@@ -13,6 +13,8 @@ To check the output, go to http://<hostname>:9110/metrics
 TODO:
 - configuration (filtering, ..?)
 - more server metrics
+- psutil's API has changed at some point, many methods dropped "get_".
+  Make this compatible with older versions (e.g. the one in CentOS 6)
 """
 
 import socket
