@@ -13,12 +13,9 @@ To check the output, go to http://<hostname>:9110/metrics
 TODO:
 - configuration (filtering, ..?)
 - more server metrics
-- psutil's API has changed at some point, many methods dropped "get_".
-  Make this compatible with older versions (e.g. the one in CentOS 6)
 """
 
 import socket
-import threading
 import time
 
 from prometheus_client import start_http_server, Gauge
@@ -31,8 +28,6 @@ import PyTango
 host = socket.gethostname()
 db = PyTango.Database()
 tango_host = "%s:%s" % (db.get_db_host(), db.get_db_port())
-servers = {}
-starter_servers = {}
 
 
 # some helper functions
@@ -48,22 +43,47 @@ def get_starter():
                     return dev
 
 
+proxies = {}
+
+
+def get_proxy(device):
+    # just a simple cache of proxies so we don't have to recreate them
+    if device in proxies:
+        return proxies[device]
+    proxy = proxies[device] = PyTango.DeviceProxy(device)
+    return proxy
+
+
 def get_server_process(name):
     "get the process of the given server"
-    info = db.get_device_info("dserver/%s" % name)
+    dserver = "dserver/%s" % name
     try:
-        process = psutil.Process(info.pid)
-        process.cpu_percent()
-        return process
+        info = db.get_device_info(dserver)
+        if info.exported:
+            # This indicates that the process has been started
+            try:
+                # Double check that the server is really running.
+                # If the server was not properly stopped (e.g. it crashed)
+                # it may not come up as unexported, and a different process
+                # might have taken over its PID.
+                proxy = get_proxy(dserver)
+                proxy.ping()
+            except PyTango.DevFailed:
+                return
+            # Now we are reasonably sure that we're monitoring the right thing
+            process = psutil.Process(info.pid)
+            process.cpu_percent()  # init the cpu calculation
+            return process
+    except PyTango.DevFailed:
+        return
     except psutil.NoSuchProcess:
         return
 
 
 def get_local_servers(host):
     "get a dict of servers and their processes"
-    servers = dict((s, get_server_process(s))
-                   for s in db.get_host_server_list(host))
-    return servers
+    return dict((s, get_server_process(s))
+                for s in db.get_host_server_list(host))
 
 
 def get_starter_servers(starter):
@@ -72,23 +92,11 @@ def get_starter_servers(starter):
     result = {}
     for line in info:
         server, state, controlled, level = line.split("\t")
-        controlled = controlled == "1"
-        if controlled:
+        if controlled == "1":
             level = int(level)
             ok = state == "ON"
             result[server] = dict(ok=ok, level=level)
     return result
-
-
-def update_servers(host, period=60):
-    "periodically update the server info"
-    global servers
-    global starter_servers
-    starter = PyTango.DeviceProxy(get_starter())
-    while True:
-        servers = get_local_servers(host)
-        starter_servers = get_starter_servers(starter)
-        time.sleep(period)
 
 
 def gather_data(host, period=1):
@@ -96,76 +104,98 @@ def gather_data(host, period=1):
     "The main loop that publishes metrics forever"
 
     # define prometheus metrics
-    server_running = Gauge("tango_server_running", "TANGO server is running",
-                           ["host", "server", "db"])
-    server_cpu_time_user = Gauge("tango_server_cpu_time_user",
-                                 "Tango server process user CPU time",
-                                 ["host", "server", "db"])
-    server_cpu_time_system = Gauge("tango_server_cpu_time_system",
-                                   "TANGO server process system CPU time",
-                                   ["host", "server", "db"])
-    server_cpu_percent = Gauge("tango_server_cpu_percent",
-                               "TANGO server process CPU percentage",
-                               ["host", "server", "db"])
+    process_metrics = {
+        name: Gauge("tango_server_{0}".format(name), desc,
+                    ["host", "server", "db"])
+        for name, desc in [
+                ("running", "TANGO server is running"),
+                ("cpu_time_user", "TANGO server process user CPU time"),
+                ("cpu_time_system", "TANGO server process system CPU time"),
+                ("cpu_percent", "TANGO server process CPU percentage"),
+                ("mem_rss", "TANGO server process memory 'resident set size'"),
+                ("mem_data", "TANGO server process number_of_threads"),
+                ("threads_n", "TANGO server process number_of_threads"),
+        ]
+    }
 
-    server_mem_rss = Gauge("tango_server_mem_rss",
-                           "TANGO server process memory 'resident set size'",
-                           ["host", "server", "db"])
-    server_mem_data = Gauge("tango_server_mem_data",
-                            "TANGO server process memory 'data resident set'",
-                            ["host", "server", "db"])
+    starter_metrics = {
+        name: Gauge("tango_server_{0}".format(name), desc,
+                    ["host", "server", "db"])
+        for name, desc in [
+                ("starter_controlled", "TANGO server controlled by starter"),
+                ("starter_level", "TANGO server starter run level")
+        ]
+    }
 
-    server_threads_n = Gauge("tango_server_threads_n",
-                             "TANGO server process number_of_threads",
-                             ["host", "server", "db"])
-
-    server_starter_controlled = Gauge("tango_server_starter_controlled",
-                                      "TANGO server controlled by starter",
-                                      ["host", "server", "db"])
-    server_starter_level = Gauge("tango_server_starter_level",
-                                 "TANGO server starter run level",
-                                 ["host", "server", "db"])
+    # setup a proxy to the local starter
+    starter = PyTango.DeviceProxy(get_starter())
+    i = 0
 
     while True:
-        # go though all local servers and check various metrics
+
+        if i % 60 == 0:
+            # once in a while we check if the starter config has changed
+            servers = get_local_servers(host)
+            starter_servers = get_starter_servers(starter)
+            for server, info in starter_servers.items():
+                labels = host, server, tango_host
+                starter_metrics["starter_controlled"].labels(*labels).set(True)
+                starter_metrics["starter_level"].labels(*labels).set(info["level"])
+
+        i += 1
+
+        # go though all local servers and update the various process metrics
         for server, process in servers.items():
-            labels = {"server": server, "host": host, "db": tango_host}
-            server_starter_controlled.labels(labels).set(server in starter_servers)
+
+            labels = host, server, tango_host
 
             if process is None:
                 # server is not running
-                server_running.labels(labels).set(0)
+                servers.pop(server)
+                # cleanup process metrics
+                for metric, gauge in process_metrics.items():
+                    if metric == "running" and server in starter_servers:
+                        # if the server is still controlled, we keep the
+                        # running metric
+                        gauge.labels(*labels).set(False)
+                        continue
+                    try:
+                        gauge.remove(*labels)
+                    except Exception:
+                        # guess the metric is not yet created, fine
+                        pass
                 continue
-
-            if server in starter_servers:
-                # add starter info to controlled servers
-                server_starter_level.labels(labels).set(starter_servers[server]["level"])
 
             try:
                 # CPU
                 cpu_times = process.cpu_times()
-                server_cpu_time_user.labels(labels).set(cpu_times.user)
-                server_cpu_time_system.labels(labels).set(cpu_times.system)
-                cpu_percent = process.cpu_percent()
-                server_cpu_percent.labels(labels).set(cpu_percent)
+                process_metrics["cpu_time_user"].labels(*labels).set(cpu_times.user)
+                process_metrics["cpu_time_system"].labels(*labels).set(cpu_times.system)
+                process_metrics["cpu_percent"].labels(*labels).set(process.cpu_percent())
 
                 # memory
                 mem_info = process.memory_info()
-                server_mem_rss.labels(labels).set(mem_info.rss)
+                process_metrics["mem_rss"].labels(*labels).set(mem_info.rss)
                 if hasattr(mem_info, "data"):
-                    server_mem_data.labels(labels).set(mem_info.data)
+                    process_metrics["mem_data"].labels(*labels).set(mem_info.data)
 
                 # threads
-                server_threads_n.labels(labels).set(process.num_threads())
+                process_metrics["threads_n"].labels(*labels).set(process.num_threads())
 
-                server_running.labels(labels).set(1)
+                process_metrics["running"].labels(*labels).set(True)
+
+                if server not in starter_servers:
+                    starter_metrics["starter_controlled"].labels(*labels).set(False)
 
             except psutil.NoSuchProcess:
                 # looks like the process is gone, let's forget it and
-                # let the update thread provide a new one.
+                # let the starter check provide a new one.
                 servers.pop(server)
-                server_running.labels(labels).set(0)
-                pass
+                for gauge in process_metrics.values():
+                    try:
+                        gauge.remove(*labels)
+                    except Exception:
+                        pass
 
         time.sleep(period)
 
@@ -173,9 +203,6 @@ def gather_data(host, period=1):
 def main():
 
     PORT_NUMBER = 9110
-
-    thread = threading.Thread(target=update_servers, args=(host,))
-    thread.start()
 
     # Set a server to export (expose to prometheus) the data
     start_http_server(PORT_NUMBER)
