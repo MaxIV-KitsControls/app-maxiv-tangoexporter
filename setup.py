@@ -4,7 +4,7 @@ from setuptools import setup
 
 setup(
     name="python-tangoexporter",
-    version="0.0.1",
+    version="0.0.2",
     description="Prometheus exporter for TANGO device servers.",
     author="Johan Forsberg",
     author_email="johan.forsberg@maxlab.lu.se",
