@@ -183,7 +183,8 @@ def gather_data(host, period=1):
                 # threads
                 process_metrics["threads_n"].labels(*labels).set(process.num_threads())
                 try:
-                    process_metrics["dserver_ping"].labels(*labels).set(get_proxy(server).ping())
+                    dserver = "dserver/%s" % server
+                    process_metrics["dserver_ping"].labels(*labels).set(get_proxy(dserver).ping())
                     process_metrics["running"].labels(*labels).set(True)
                 except PyTango.DevFailed:
                     process_metrics["dserver_ping"].labels(*labels).set(-1)
