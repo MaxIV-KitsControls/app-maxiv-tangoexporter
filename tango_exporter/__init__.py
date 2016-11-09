@@ -115,6 +115,7 @@ def gather_data(host, period=1):
                 ("mem_rss", "TANGO server process memory 'resident set size'"),
                 ("mem_data", "TANGO server process number_of_threads"),
                 ("threads_n", "TANGO server process number_of_threads"),
+                ("dserver_ping", "TANGO dserver ping time"),
         ]
     }
 
@@ -161,7 +162,7 @@ def gather_data(host, period=1):
                         continue
                     try:
                         gauge.remove(*labels)
-                    except Exception:
+                    except Exception: # ValueError ?
                         # guess the metric is not yet created, fine
                         pass
                 continue
@@ -181,8 +182,12 @@ def gather_data(host, period=1):
 
                 # threads
                 process_metrics["threads_n"].labels(*labels).set(process.num_threads())
-
-                process_metrics["running"].labels(*labels).set(True)
+                try:
+                    process_metrics["dserver_ping"].labels(*labels).set(get_proxy(server).ping())
+                    process_metrics["running"].labels(*labels).set(True)
+                except PyTango.DevFailed:
+                    process_metrics["dserver_ping"].labels(*labels).set(-1)
+                    process_metrics["running"].labels(*labels).set(False)
 
                 if server not in starter_servers:
                     starter_metrics["starter_controlled"].labels(*labels).set(False)
