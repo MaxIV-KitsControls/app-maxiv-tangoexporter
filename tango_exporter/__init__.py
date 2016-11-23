@@ -96,7 +96,7 @@ def get_starter_servers(starter):
         # Looks like the "controlled" column is sometimes lying :(
         controlled = bool(int(controlled)) and level > 0
         ok = state == "ON"
-        result[server] = dict(ok=ok, level=level)
+        result[server] = dict(ok=ok, controlled=controlled, level=level)
     return result
 
 
@@ -141,7 +141,7 @@ def gather_data(host, period=1):
             starter_servers = get_starter_servers(starter)
             for server, info in starter_servers.items():
                 labels = host, server, tango_host
-                starter_metrics["starter_controlled"].labels(*labels).set(True)
+                starter_metrics["starter_controlled"].labels(*labels).set(info["controlled"])
                 starter_metrics["starter_level"].labels(*labels).set(info["level"])
 
         i += 1
