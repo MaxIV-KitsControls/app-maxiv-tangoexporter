@@ -92,7 +92,10 @@ def get_starter_servers(starter):
     result = {}
     for line in info:
         server, state, controlled, level = line.split("\t")
-        if controlled == "1":
+        # Filter only servers that are "controlled", e.g. that
+        # have a level configured.
+        #if controlled == "1":  # This is not always correct!
+        if level != "0":  # Let's see if *this* is correct...
             level = int(level)
             ok = state == "ON"
             result[server] = dict(ok=ok, level=level)
