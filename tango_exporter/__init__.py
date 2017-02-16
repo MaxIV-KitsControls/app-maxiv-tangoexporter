@@ -88,6 +88,7 @@ def get_local_servers(host):
 
 def get_starter_servers(starter):
     "get the starter's list of controlled servers"
+    starter.UpdateServersInfo()  # make sure the starter is up-to-date
     info = starter.read_attribute("Servers").value
     result = {}
     for line in info:
@@ -139,10 +140,15 @@ def gather_data(host, period=1):
             # once in a while we check if the starter config has changed
             servers = get_local_servers(host)
             starter_servers = get_starter_servers(starter)
+            relevant = set()
             for server, info in starter_servers.items():
                 labels = host, server, tango_host
+                relevant.add(labels)
                 starter_metrics["starter_controlled"].labels(*labels).set(info["controlled"])
                 starter_metrics["starter_level"].labels(*labels).set(info["level"])
+            for labels in list(starter_metrics["starter_controlled"]._metrics.keys()):
+                if labels not in relevant:
+                    starter_metrics["starter_controlled"].remove(*labels)
 
         i += 1
 
