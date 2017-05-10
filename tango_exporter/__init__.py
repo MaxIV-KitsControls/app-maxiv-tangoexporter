@@ -13,6 +13,7 @@ To check the output, go to http://<hostname>:9110/metrics
 TODO:
 - configuration (filtering, ..?)
 - more server metrics
+
 """
 
 import socket
@@ -25,9 +26,17 @@ import PyTango
 
 
 # a few globals (sorry about that, just keeping things simple...)
+
 host = socket.gethostname()
-db = PyTango.Database()
-tango_host = "%s:%s" % (db.get_db_host(), db.get_db_port())
+while True:
+    try:
+        db = PyTango.Database()
+        tango_host = "%s:%s" % (db.get_db_host(), db.get_db_port())
+    except PyTango.DevFailed as e:
+        print e
+        time.sleep(60)
+    else:
+        break
 
 
 # some helper functions
@@ -101,6 +110,10 @@ def get_starter_servers(starter):
     return result
 
 
+def get_starter_properties(starter):
+    return starter.get_property(["HostCollection", "HostUsage"])
+
+
 def gather_data(host, period=1):
 
     "The main loop that publishes metrics forever"
@@ -108,7 +121,7 @@ def gather_data(host, period=1):
     # define prometheus metrics
     process_metrics = {
         name: Gauge("tango_server_{0}".format(name), desc,
-                    ["host", "server", "db"])
+                    ["host", "server", "db", "host_collection", "host_usage"])
         for name, desc in [
                 ("running", "TANGO server is running"),
                 ("cpu_time_user", "TANGO server process user CPU time"),
@@ -123,7 +136,7 @@ def gather_data(host, period=1):
 
     starter_metrics = {
         name: Gauge("tango_server_{0}".format(name), desc,
-                    ["host", "server", "db"])
+                    ["host", "server", "db", "host_collection", "host_usage"])
         for name, desc in [
                 ("starter_controlled", "TANGO server controlled by starter"),
                 ("starter_level", "TANGO server starter run level")
@@ -134,15 +147,28 @@ def gather_data(host, period=1):
     starter = PyTango.DeviceProxy(get_starter())
     i = 0
 
+    props = starter.get_property(["HostCollection", "HostUsage"])
+    collection = props["HostCollection"][0] if props["HostCollection"] else None
+    usage = props["HostUsage"][0] if props["HostUsage"] else None
+
     while True:
 
         if i % 60 == 0:
             # once in a while we check if the starter config has changed
-            servers = get_local_servers(host)
-            starter_servers = get_starter_servers(starter)
+            try:
+                servers = get_local_servers(host)
+                starter_servers = get_starter_servers(starter)
+            except (PyTango.DevFailed, AttributeError):
+                print "Could not connect to local Starter... retrying"
+                # TODO: what do we do here?
+                time.sleep(10)
+                continue
             relevant = set()
+            props = starter.get_property(["HostCollection", "HostUsage"])
+            collection = props["HostCollection"][0] if props["HostCollection"] else None
+            usage = props["HostUsage"][0] if props["HostUsage"] else None
             for server, info in starter_servers.items():
-                labels = host, server, tango_host
+                labels = host, server, tango_host, collection, usage
                 relevant.add(labels)
                 starter_metrics["starter_controlled"].labels(*labels).set(info["controlled"])
                 starter_metrics["starter_level"].labels(*labels).set(info["level"])
@@ -155,7 +181,7 @@ def gather_data(host, period=1):
         # go though all local servers and update the various process metrics
         for server, process in servers.items():
 
-            labels = host, server, tango_host
+            labels = host, server, tango_host, collection, usage
 
             if process is None:
                 # server is not running
